@@ -57,6 +57,31 @@ async function callLanguageTool(text) {
   return await res2.json()
 }
 
+async function callTranslate(text, source = 'auto', target = 'ru') {
+  // Try proxy first
+  try {
+    const res = await fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: text, source, target })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      return data
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Direct fallback to public LibreTranslate instance (may have CORS issues locally)
+  const res2 = await fetch('https://libretranslate.de/translate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: text, source: source === 'auto' ? 'auto' : source, target, format: 'text' })
+  })
+  return await res2.json()
+}
+
 function applyCorrections(text, matches) {
   if (!text) return ''
   if (!matches || matches.length === 0) return text
@@ -102,13 +127,16 @@ export default function App() {
   const [lessonIndex, setLessonIndex] = useState(0)
   const [score, setScore] = useState(0)
   const [history, setHistory] = useState(safeGet(STORAGE.history, []))
+  const [translation, setTranslation] = useState('')
+  const [translateSource, setTranslateSource] = useState('auto')
+  const [translateTarget, setTranslateTarget] = useState('ru')
   const recognitionRef = useRef(null)
 
   useEffect(()=>{ setHistory(safeGet(STORAGE.history,[])) }, [])
 
   function supportsSR() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition) }
 
-  function startRecording(expected) {
+  async function startRecording(expected) {
     setError(null)
     if (!supportsSR()) { setError('SpeechRecognition не поддерживается в этом браузере. Используй Chrome/Edge.') ; return }
 
@@ -138,6 +166,17 @@ export default function App() {
         const next = [entry, ...prev].slice(0,50)
         safeSet(STORAGE.history, next)
         setHistory(next)
+
+        // auto-translate transcript (French -> Russian)
+        try {
+          const tr = await callTranslate(t, 'fr', 'ru')
+          // LibreTranslate returns { translatedText: '...' } sometimes, or { result } — handle both
+          const txt = tr.translatedText || tr.translated || tr.result || (tr.data && tr.data.translatedText) || ''
+          setTranslation(txt)
+        } catch (err) {
+          // ignore translate errors
+        }
+
       } catch (err) {
         console.error(err)
         setError('Ошибка проверки: ' + (err.message||err))
@@ -160,9 +199,26 @@ export default function App() {
     setScore(0)
     const pCount = selectedLesson.prompts.length
     setLessonIndex((i)=> (i+1)%pCount)
+    setTranslation('')
   }
 
   function speak(text) { if (!text) return; const u = new SpeechSynthesisUtterance(text); u.lang = LANG; const v = speechSynthesis.getVoices().find(x=>x.lang && x.lang.startsWith('fr')); if (v) u.voice = v; speechSynthesis.cancel(); speechSynthesis.speak(u) }
+
+  async function translateText(text, source = 'auto', target = 'ru') {
+    if (!text) return
+    setStatus('Перевожу...')
+    try {
+      const res = await callTranslate(text, source, target)
+      const txt = res.translatedText || res.translated || res.result || (res.data && res.data.translatedText) || ''
+      setTranslation(txt)
+      setStatus('Готово')
+      return txt
+    } catch (err) {
+      console.error(err)
+      setError('Ошибка перевода: ' + (err.message||err))
+      setStatus('Ошибка')
+    }
+  }
 
   async function exportHistory() {
     const data = safeGet(STORAGE.history, [])
@@ -212,6 +268,11 @@ export default function App() {
                 <div style={{ marginTop:12 }}>
                   <strong>Исправленный вариант:</strong>
                   <div style={{ padding:12, background:'#f0fdf4', borderRadius:8, marginTop:8 }}>{corrected||<span style={{ color:'#94a3b8' }}>Здесь появится исправленный текст</span>}</div>
+                </div>
+
+                <div style={{ marginTop:12 }}>
+                  <strong>Перевод (FR → RU):</strong>
+                  <div style={{ padding:12, background:'#fff7ed', borderRadius:8, marginTop:8 }}>{translation||<span style={{ color:'#94a3b8' }}>Здесь появится перевод распознанного текста</span>}</div>
                 </div>
 
                 <div style={{ marginTop:12, display:'flex', gap:8, alignItems:'center' }}>
@@ -320,6 +381,37 @@ export default function App() {
         )}
 
       </main>
+
+      <section style={{ maxWidth:1000, margin:'18px auto' }}>
+        <div style={{ padding:12, background:'#fff', borderRadius:10 }}>
+          <h3>Перевод текста (FR ⇄ RU)</h3>
+          <div style={{ display:'flex', gap:8, marginBottom:8 }}>
+            <select value={translateSource} onChange={(e)=>setTranslateSource(e.target.value)}>
+              <option value="auto">auto</option>
+              <option value="fr">fr</option>
+              <option value="ru">ru</option>
+            </select>
+            <select value={translateTarget} onChange={(e)=>setTranslateTarget(e.target.value)}>
+              <option value="ru">ru</option>
+              <option value="fr">fr</option>
+            </select>
+          </div>
+
+          <div style={{ display:'flex', gap:8 }}>
+            <textarea id="translate-input" placeholder="Введите текст или вставьте" style={{ flex:1, padding:10 }}></textarea>
+            <div style={{ width:160, display:'flex', flexDirection:'column', gap:8 }}>
+              <button onClick={async ()=>{ const txt = (document.getElementById('translate-input')||{}).value; await translateText(txt, translateSource, translateTarget) }}>Перевести</button>
+              <button onClick={()=>{ (document.getElementById('translate-input').value = transcript || ''); setTranslateSource('fr'); setTranslateTarget('ru'); }}>Заполнить из распознавания</button>
+              <button onClick={()=>{ (document.getElementById('translate-input').value = corrected || ''); setTranslateSource('fr'); setTranslateTarget('ru'); }}>Заполнить из исправленного</button>
+            </div>
+          </div>
+
+          <div style={{ marginTop:12, padding:10, background:'#fbfbff', borderRadius:8 }}>
+            <strong>Результат перевода:</strong>
+            <div style={{ marginTop:8 }}>{translation || <span style={{ color:'#94a3b8' }}>Здесь появится перевод</span>}</div>
+          </div>
+        </div>
+      </section>
 
       <footer style={{ marginTop:20, color:'#64748b' }}>
         <div style={{ display:'flex', justifyContent:'space-between', gap:12 }}>
