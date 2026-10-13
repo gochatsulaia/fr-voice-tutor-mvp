@@ -2,481 +2,332 @@ import React, { useState, useRef, useEffect } from 'react'
 
 const LANG = 'fr-FR'
 
-const SAMPLE_PHRASES = [
-  { id: 1, label: 'Приветствие', text: 'Bonjour, comment ça va ?', accent: 'Базовый диалог' },
-  { id: 2, label: 'Покупки', text: 'Je voudrais un café, s’il vous plaît.', accent: 'Покупки и повседневная речь' },
-  { id: 3, label: 'Утро', text: 'Je me lève tôt et je prends le petit-déjeuner.', accent: 'Режим дня' },
-  { id: 4, label: 'Работа', text: 'Je travaille bien et j’apprends le français tous les jours.', accent: 'Мотивация' },
-  { id: 5, label: 'Путешествие', text: 'Je veux visiter Paris et parler avec des gens locaux.', accent: 'Путешествия' },
-  { id: 6, label: 'Чувства', text: 'Je suis très content d’apprendre le français.', accent: 'Личное выражение' },
+const LESSONS = [
+  {
+    id: 'a1-1',
+    title: 'Приветствия (A1)',
+    prompts: [
+      'Bonjour, comment ça va ? ',
+      'Je m’appelle Pierre. Et toi ?',
+      'Enchanté de faire ta connaissance.'
+    ]
+  },
+  {
+    id: 'a1-2',
+    title: 'Заказ в кафе (A1)',
+    prompts: [
+      'Je voudrais un café, s’il vous plaît.',
+      'Combien ça coûte ? ',
+      'L’addition, s’il vous plaît.'
+    ]
+  }
 ]
 
-const STORAGE_KEYS = {
-  history: 'fr_voice_tutor_history_v2',
-  email: 'fr_voice_tutor_email_v2',
+const STORAGE = {
+  history: 'fr_voice_tutor_history_v3',
+  email: 'fr_voice_tutor_email_v3',
+  settings: 'fr_voice_tutor_settings_v3'
 }
 
-function safeStorageGet(key, fallback) {
-  if (typeof window === 'undefined') return fallback
+function safeGet(k, fallback) {
+  try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback } catch { return fallback }
+}
+function safeSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} }
+
+async function callLanguageTool(text) {
+  // Try proxy first (when deployed on Vercel this will call serverless function)
   try {
-    const val = localStorage.getItem(key)
-    return val ? JSON.parse(val) : fallback
-  } catch {
-    return fallback
-  }
-}
-
-function safeStorageSet(key, value) {
-  if (typeof window === 'undefined') return
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    // ignore
-  }
-}
-
-function computeScore(transcript, corrected) {
-  const source = (transcript || '').trim()
-  const target = (corrected || '').trim()
-  if (!source && !target) return 0
-  if (!source) return 0
-  if (source === target) return 100
-
-  const normalize = (value) =>
-    value
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s]/gu, '')
-      .split(/\s+/)
-      .filter(Boolean)
-
-  const a = normalize(source)
-  const b = normalize(target)
-  const maxLen = Math.max(a.length, b.length)
-  if (maxLen === 0) return 0
-
-  let same = 0
-  const limit = Math.min(a.length, b.length)
-  for (let i = 0; i < limit; i++) {
-    if (a[i] === b[i]) same += 1
+    const res = await fetch('/api/languagetool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ text, language: 'fr' })
+    })
+    if (res.ok) return await res.json()
+    // fallback
+  } catch (e) {
+    // ignore and fallback
   }
 
-  const similarity = (same / maxLen) * 100
-  return Math.max(0, Math.min(100, Math.round(similarity)))
-}
-
-function generateCoachAdvice(transcript, corrected, matches) {
-  if (!transcript) {
-    return 'Нажми «Говорить» и попробуй одну короткую фразу.'
-  }
-
-  if (corrected === transcript) {
-    return 'Отлично! Фраза звучит хорошо. Попробуй усложнить её и добавить ещё один глагол или обстоятельство.'
-  }
-
-  const list = []
-  const text = (matches || []).map(m => (m.message || '')).join(' ').toLowerCase()
-
-  if (text.includes('article') || text.includes('determin')) {
-    list.push('Проверь артикли: le, la, les, un, une — они очень важны в французском.')
-  }
-  if (text.includes('verb') || text.includes('conjug')) {
-    list.push('Проверь форму глагола: часто ошибка в окончании или в согласовании с подлежащим.')
-  }
-  if (text.includes('accen') || text.includes('apostrophe') || text.includes('letter')) {
-    list.push('Обрати внимание на ударения и апострофы: в французском они сильно влияют на звучание.')
-  }
-  if (text.includes('singular') || text.includes('plural') || text.includes('gender')) {
-    list.push('Проверь род и число: многие ошибки появляются в окончании прилагательных и существительных.')
-  }
-  if (list.length === 0) {
-    list.push('Повторяй короткую фразу 2–3 раза. Главное — замедлить темп и разделить слова по слогам.')
-    list.push('Сфокусируйся на произношении гласных: a, e, i, o, u и носовых звуков.')
-  }
-
-  return list.join(' ')
+  // Direct fallback (may fail locally due to CORS)
+  const res2 = await fetch('https://api.languagetool.org/v2/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ text, language: 'fr' })
+  })
+  return await res2.json()
 }
 
 function applyCorrections(text, matches) {
   if (!text) return ''
   if (!matches || matches.length === 0) return text
-
-  const sorted = [...matches].sort((a, b) => (a.offset || 0) - (b.offset || 0))
-  let output = ''
+  const sorted = [...matches].sort((a,b)=> (a.offset||0)-(b.offset||0))
+  let out = ''
   let cursor = 0
-
-  for (const item of sorted) {
-    const start = item.offset || 0
-    const length = item.length || 0
-    const replacement =
-      (item.replacements && item.replacements[0] && item.replacements[0].value) || text.slice(start, start + length)
-
+  for (const m of sorted) {
+    const start = m.offset || 0
+    const len = m.length || 0
+    const rep = (m.replacements && m.replacements[0] && m.replacements[0].value) || text.slice(start, start+len)
     if (start >= cursor) {
-      output += text.slice(cursor, start)
-      output += replacement
-      cursor = start + length
+      out += text.slice(cursor, start)
+      out += rep
+      cursor = start + len
     }
   }
+  if (cursor < text.length) out += text.slice(cursor)
+  return out
+}
 
-  if (cursor < text.length) {
-    output += text.slice(cursor)
-  }
-
-  return output
+function scoreSimple(orig, corr) {
+  if (!orig) return 0
+  if (!corr) return 0
+  const a = orig.toLowerCase().replace(/[^\p{L}\s]/gu,'').split(/\s+/).filter(Boolean)
+  const b = corr.toLowerCase().replace(/[^\p{L}\s]/gu,'').split(/\s+/).filter(Boolean)
+  const max = Math.max(a.length, b.length)
+  if (max===0) return 0
+  let same = 0
+  for (let i=0;i<Math.min(a.length,b.length);i++) if (a[i]===b[i]) same++
+  return Math.round((same/max)*100)
 }
 
 export default function App() {
+  const [mode, setMode] = useState('practice') // practice | lesson
   const [listening, setListening] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [corrected, setCorrected] = useState('')
   const [matches, setMatches] = useState([])
   const [status, setStatus] = useState('Готово')
   const [error, setError] = useState(null)
-  const [selectedPhrase, setSelectedPhrase] = useState(SAMPLE_PHRASES[0].text)
+
+  const [selectedLesson, setSelectedLesson] = useState(LESSONS[0])
+  const [lessonIndex, setLessonIndex] = useState(0)
   const [score, setScore] = useState(0)
-  const [history, setHistory] = useState([])
-  const [coachAdvice, setCoachAdvice] = useState('Нажми «Говорить» и начни тренировку.')
+  const [history, setHistory] = useState(safeGet(STORAGE.history, []))
   const recognitionRef = useRef(null)
 
-  useEffect(() => {
-    const saved = safeStorageGet(STORAGE_KEYS.history, [])
-    setHistory(saved)
-  }, [])
+  useEffect(()=>{ setHistory(safeGet(STORAGE.history,[])) }, [])
 
-  function supportsSpeechRecognition() {
-    return !!(window.SpeechRecognition || window.webkitSpeechRecognition)
-  }
+  function supportsSR() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition) }
 
-  function pushHistory(entry) {
-    const prev = safeStorageGet(STORAGE_KEYS.history, [])
-    const next = [entry, ...prev].slice(0, 8)
-    safeStorageSet(STORAGE_KEYS.history, next)
-    setHistory(next)
-  }
-
-  function startRecording() {
+  function startRecording(expected) {
     setError(null)
+    if (!supportsSR()) { setError('SpeechRecognition не поддерживается в этом браузере. Используй Chrome/Edge.') ; return }
 
-    if (!supportsSpeechRecognition()) {
-      setError('SpeechRecognition не поддерживается в этом браузере. Попробуй Chrome или Edge.')
-      return
-    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    const rec = new SR()
+    rec.lang = LANG
+    rec.interimResults = false
+    rec.maxAlternatives = 1
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    const recognition = new SpeechRecognition()
-    recognition.lang = LANG
-    recognition.interimResults = false
-    recognition.maxAlternatives = 1
-
-    recognition.onstart = () => {
-      setListening(true)
-      setStatus('Слушаю... говори 5–15 секунд')
-    }
-
-    recognition.onresult = async (event) => {
-      const nextText = event.results[event.results.length - 1][0].transcript
-      setTranscript(nextText)
-      setStatus('Обрабатываю текст...')
-      await checkGrammar(nextText)
-    }
-
-    recognition.onerror = (e) => {
-      setError('Ошибка распознавания: ' + e.error)
-      setListening(false)
-      setStatus('Ошибка распознавания')
-    }
-
-    recognition.onend = () => {
-      setListening(false)
-      setStatus((current) => current === 'Слушаю... говори 5–15 секунд' ? 'Готово' : current)
-    }
-
-    recognitionRef.current = recognition
-    recognition.start()
-  }
-
-  function stopRecording() {
-    if (recognitionRef.current) recognitionRef.current.stop()
-    setListening(false)
-    setStatus('Остановлено')
-  }
-
-  async function checkGrammar(text) {
-    try {
-      setError(null)
-      const params = new URLSearchParams()
-      params.append('text', text)
-      params.append('language', 'fr')
-
-      const response = await fetch('https://api.languagetool.org/v2/check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString(),
-      })
-
-      let matchesList = []
-      let correctedText = text
-
-      if (response.ok) {
-        const data = await response.json()
-        matchesList = data.matches || []
-        correctedText = applyCorrections(text, matchesList)
-      } else {
-        correctedText = text
-        matchesList = []
-      }
-
-      const nextScore = computeScore(text, correctedText)
-      setMatches(matchesList)
-      setCorrected(correctedText)
-      setScore(nextScore)
-      setCoachAdvice(generateCoachAdvice(text, correctedText, matchesList))
-      setStatus('Готово')
-
-      pushHistory({
-        transcript: text,
-        corrected: correctedText,
-        score: nextScore,
-        ts: Date.now(),
-      })
-    } catch (err) {
-      console.error(err)
-      setError('Ошибка проверки: ' + err.message)
-      setStatus('Ошибка проверки')
-    }
-  }
-
-  function speak(text) {
-    if (!text) return
-    if (!('speechSynthesis' in window)) {
-      setError('SpeechSynthesis не поддерживается в этом браузере')
-      return
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.lang = LANG
-    const voices = speechSynthesis.getVoices()
-    const frenchVoice = voices.find((voice) => voice.lang && voice.lang.toLowerCase().startsWith('fr'))
-    if (frenchVoice) utterance.voice = frenchVoice
-
-    speechSynthesis.cancel()
-    speechSynthesis.speak(utterance)
-  }
-
-  function renderDiff(orig, corr) {
-    const a = (orig || '').trim().split(/\s+/).filter(Boolean)
-    const b = (corr || '').trim().split(/\s+/).filter(Boolean)
-    const len = Math.max(a.length, b.length)
-    const parts = []
-
-    for (let i = 0; i < len; i++) {
-      const wa = a[i] || ''
-      const wb = b[i] || ''
-      if (!wa && wb) {
-        parts.push(<span key={`add-${i}`} className="diff-added">{wb} </span>)
-      } else if (wa && !wb) {
-        parts.push(<span key={`rem-${i}`} className="diff-removed">{wa} </span>)
-      } else if (wa === wb) {
-        parts.push(<span key={`same-${i}`} className="diff-same">{wa} </span>)
-      } else {
-        parts.push(<span key={`chg-${i}`} className="diff-changed">{wb} </span>)
-      }
-    }
-
-    return parts.length ? parts : <span className="muted">Пока нет сравнения</span>
-  }
-
-  async function shareResult() {
-    const summary = `Я сказал: ${transcript}\nИсправлено: ${corrected}\nОценка: ${score}/100`
-
-    if (navigator.share) {
+    rec.onstart = () => { setListening(true); setStatus('Слушаю...') }
+    rec.onresult = async (e) => {
+      const t = e.results[e.results.length-1][0].transcript
+      setTranscript(t)
+      setStatus('Проверяю...')
       try {
-        await navigator.share({ title: 'FR Voice Tutor', text: summary })
-      } catch (e) {
-        console.error(e)
+        const data = await callLanguageTool(t)
+        const mm = data.matches || []
+        const corr = applyCorrections(t, mm)
+        setMatches(mm)
+        setCorrected(corr)
+        const sc = scoreSimple(t, corr)
+        setScore(sc)
+        setStatus('Готово')
+        // push history
+        const entry = { ts: Date.now(), transcript: t, corrected: corr, score: sc, lessonId: selectedLesson.id }
+        const prev = safeGet(STORAGE.history, [])
+        const next = [entry, ...prev].slice(0,50)
+        safeSet(STORAGE.history, next)
+        setHistory(next)
+      } catch (err) {
+        console.error(err)
+        setError('Ошибка проверки: ' + (err.message||err))
+        setStatus('Ошибка')
       }
-      return
     }
+    rec.onerror = (e) => { setError('Ошибка распознавания: '+e.error); setStatus('Ошибка') ; setListening(false) }
+    rec.onend = () => { setListening(false); if (status==='Слушаю...') setStatus('Готово') }
 
-    if (navigator.clipboard) {
-      await navigator.clipboard.writeText(summary)
-      alert('Результат скопирован в буфер обмена')
-      return
-    }
-
-    prompt('Скопируй результат:', summary)
+    recognitionRef.current = rec
+    rec.start()
   }
 
-  function saveEmail() {
-    const input = document.getElementById('email-input')
-    const email = input ? input.value : ''
-    if (!email || !email.includes('@')) {
-      alert('Введите корректный email')
-      return
-    }
+  function stopRecording() { if (recognitionRef.current) recognitionRef.current.stop(); setListening(false); setStatus('Остановлено') }
 
-    const prev = safeStorageGet(STORAGE_KEYS.email, [])
-    const next = [...prev, { email, ts: Date.now() }]
-    safeStorageSet(STORAGE_KEYS.email, next)
-    input.value = ''
-    alert('Спасибо! Ты подписан на обновления.')
+  function nextPrompt() {
+    setTranscript('')
+    setCorrected('')
+    setMatches([])
+    setScore(0)
+    const pCount = selectedLesson.prompts.length
+    setLessonIndex((i)=> (i+1)%pCount)
   }
 
-  const todayCount = history.filter((entry) => {
-    const date = new Date(entry.ts)
-    const now = new Date()
-    return date.toDateString() === now.toDateString()
-  }).length
+  function speak(text) { if (!text) return; const u = new SpeechSynthesisUtterance(text); u.lang = LANG; const v = speechSynthesis.getVoices().find(x=>x.lang && x.lang.startsWith('fr')); if (v) u.voice = v; speechSynthesis.cancel(); speechSynthesis.speak(u) }
 
-  const averageScore = history.length
-    ? Math.round(history.reduce((acc, item) => acc + (item.score || 0), 0) / history.length)
-    : 0
+  async function exportHistory() {
+    const data = safeGet(STORAGE.history, [])
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'fr-voice-history.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function clearHistory() { safeSet(STORAGE.history, []); setHistory([]); alert('История очищена') }
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
+    <div style={{ maxWidth: 1000, margin: '24px auto', fontFamily: 'Inter, system-ui, sans-serif' }}>
+      <header style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:18 }}>
         <div>
-          <span className="pill">Free MVP</span>
-          <h1>FR Voice Tutor</h1>
+          <h1 style={{ margin:0 }}>FR Voice Tutor — Stage 3</h1>
+          <div style={{ color:'#475569' }}>Режим: {mode}</div>
         </div>
-        <button className="ghost-btn" onClick={() => speak(corrected || selectedPhrase)}>Слушать пример</button>
+        <div>
+          <button onClick={()=>setMode(mode==='practice'?'lesson':'practice') } style={{ marginRight:8 }}>{mode==='practice'?'Перейти в режим урока':'Перейти в практику'}</button>
+          <button onClick={()=>exportHistory()}>Экспорт истории</button>
+        </div>
       </header>
 
-      <section className="hero card">
-        <div>
-          <p className="eyebrow">Практика французского языка</p>
-          <h2>Говори, получай исправления и учись быстрее.</h2>
-          <p className="subtext">
-            Этот MVP позволяет тебе произнести фразу, услышать корректный вариант и понять, где была ошибка.
-          </p>
-        </div>
+      <main>
+        {mode==='practice' && (
+          <section style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:18 }}>
+            <div>
+              <div style={{ padding:18, borderRadius:12, background:'#fff', boxShadow:'0 6px 18px rgba(15,23,42,0.06)' }}>
+                <h2>Практика (быстрая проверка)</h2>
+                <p style={{ color:'#475569' }}>Говори свободно любой короткий текст на французском, приложение проверит и покажет исправления.</p>
 
-        <div className="stats-grid">
-          <div className="stat-box">
-            <strong>{todayCount}</strong>
-            <span>Сегодня</span>
-          </div>
-          <div className="stat-box">
-            <strong>{averageScore}%</strong>
-            <span>Средний балл</span>
-          </div>
-          <div className="stat-box">
-            <strong>{history.length}</strong>
-            <span>Проверок</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="practice-row">
-        <div className="card phrase-card">
-          <h3>Примеры фраз</h3>
-          <div className="phrase-list">
-            {SAMPLE_PHRASES.map((phrase) => (
-              <button
-                key={phrase.id}
-                className={`phrase-btn ${selectedPhrase === phrase.text ? 'active' : ''}`}
-                onClick={() => {
-                  setSelectedPhrase(phrase.text)
-                  setTranscript('')
-                  setCorrected('')
-                  setMatches([])
-                  setCoachAdvice(`Попробуй сказать: “${phrase.text}”`)
-                }}
-              >
-                <span>{phrase.label}</span>
-                <small>{phrase.accent}</small>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="card coach-card">
-          <h3>ИИ-советник</h3>
-          <p>{coachAdvice}</p>
-          <div className="score-box">
-            <span>Текущий результат</span>
-            <strong>{score}%</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="card action-card">
-        <div className="controls">
-          <button className="primary-btn" onClick={startRecording} disabled={listening}>
-            {listening ? 'Слушаю...' : 'Говорить'}
-          </button>
-          <button className="secondary-btn" onClick={stopRecording} disabled={!listening}>Остановить</button>
-          <button className="secondary-btn" onClick={() => speak(corrected || selectedPhrase)}>Прослушать</button>
-          <button className="secondary-btn" onClick={shareResult}>Поделиться</button>
-        </div>
-
-        <div className="status-row">
-          <div className="status-tag">{status}</div>
-          {error && <div className="error-tag">{error}</div>}
-        </div>
-      </section>
-
-      <section className="results-grid">
-        <div className="card result-card">
-          <h3>Что ты сказал</h3>
-          <div className="result-box">
-            {transcript || <span className="muted">Пока нет записи. Нажми «Говорить».</span>}
-          </div>
-        </div>
-
-        <div className="card result-card">
-          <h3>Правильный вариант</h3>
-          <div className="result-box corrected-box">
-            {corrected || <span className="muted">Здесь появится правильная формулировка.</span>}
-          </div>
-          <div className="diff-box">{renderDiff(transcript, corrected)}</div>
-        </div>
-      </section>
-
-      <section className="card insights-card">
-        <h3>Проверка и анализ</h3>
-        {matches.length === 0 ? (
-          <p className="muted">Пока нет деталей. Сначала произнеси фразу и дождись проверки.</p>
-        ) : (
-          <ul className="insight-list">
-            {matches.slice(0, 4).map((item, index) => (
-              <li key={`${item.message}-${index}`}>
-                <strong>{item.message}</strong>
-                {item.replacements && item.replacements.length > 0 && (
-                  <span> — возможно: {item.replacements.slice(0, 2).map((r) => r.value).join(', ')}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="card history-card">
-        <h3>История практики</h3>
-        {history.length === 0 ? (
-          <p className="muted">Пока нет записей — начни сегодня с одной короткой фразы.</p>
-        ) : (
-          <div className="history-list">
-            {history.map((item, index) => (
-              <div key={`${item.ts}-${index}`} className="history-item">
-                <div>
-                  <strong>{item.transcript || '—'}</strong>
-                  <small>{new Date(item.ts).toLocaleString('ru-RU')}</small>
+                <div style={{ marginTop:12 }}>
+                  <button onClick={()=>startRecording()} disabled={listening} style={{ padding:'10px 14px', marginRight:8 }}>{listening? 'Слушаю...':'Говорить'}</button>
+                  <button onClick={()=>stopRecording()} disabled={!listening} style={{ padding:'10px 14px', marginRight:8 }}>Остановить</button>
+                  <button onClick={()=>speak(corrected || transcript)} style={{ padding:'10px 14px' }}>Прослушать</button>
                 </div>
-                <span>{item.score}%</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
 
-      <footer className="card signup-card">
-        <div>
-          <h3>Бесплатные обновления</h3>
-          <p>Подпишись, чтобы узнавать о новых функциях, бесплатных уроках и улучшениях.</p>
-        </div>
-        <div className="signup-row">
-          <input id="email-input" type="email" placeholder="Твой e-mail" />
-          <button className="primary-btn" onClick={saveEmail}>Подписаться</button>
+                <div style={{ marginTop:16 }}>
+                  <strong>ASR:</strong>
+                  <div style={{ padding:12, background:'#f8fafc', borderRadius:8, marginTop:8 }}>{transcript||<span style={{ color:'#94a3b8' }}>Тут будет распознанный текст</span>}</div>
+                </div>
+
+                <div style={{ marginTop:12 }}>
+                  <strong>Исправленный вариант:</strong>
+                  <div style={{ padding:12, background:'#f0fdf4', borderRadius:8, marginTop:8 }}>{corrected||<span style={{ color:'#94a3b8' }}>Здесь появится исправленный текст</span>}</div>
+                </div>
+
+                <div style={{ marginTop:12, display:'flex', gap:8, alignItems:'center' }}>
+                  <div style={{ fontWeight:700 }}>{score}%</div>
+                  <div style={{ color:'#64748b' }}>Оценка совпадения</div>
+                </div>
+
+              </div>
+
+              <div style={{ marginTop:16 }}>
+                <h3>История</h3>
+                <div style={{ background:'#fff', borderRadius:12, padding:12 }}>
+                  {history.length===0 ? <div style={{ color:'#94a3b8' }}>История пуста</div> : history.slice(0,8).map((h, idx)=> (
+                    <div key={h.ts} style={{ display:'flex', justifyContent:'space-between', padding:'6px 0', borderBottom: idx<7?'1px solid rgba(15,23,42,0.04)':'none' }}>
+                      <div>
+                        <div style={{ fontWeight:700 }}>{h.transcript}</div>
+                        <div style={{ color:'#64748b', fontSize:12 }}>{new Date(h.ts).toLocaleString()}</div>
+                      </div>
+                      <div style={{ fontWeight:700, color:'#0ea5a4' }}>{h.score}%</div>
+                    </div>
+                  ))}
+
+                  <div style={{ marginTop:12, display:'flex', gap:8 }}>
+                    <button onClick={()=>exportHistory()}>Экспорт</button>
+                    <button onClick={()=>clearHistory()}>Очистить</button>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <aside>
+              <div style={{ padding:16, borderRadius:12, background:'#fff' }}>
+                <h3>Советы от ИИ</h3>
+                <p style={{ color:'#475569' }}>Говори медленнее, фокусируйся на гласных и носовых звуках. Повторяй фразу 3 раза подряд.</p>
+                <h4 style={{ marginTop:12 }}>Примеры фраз</h4>
+                <ul>
+                  <li>Bonjour, comment ça va ?</li>
+                  <li>Je voudrais un café, s’il vous plaît.</li>
+                  <li>Je me lève tôt tous les jours.</li>
+                </ul>
+              </div>
+
+              <div style={{ marginTop:12, padding:12, background:'#fff', borderRadius:12 }}>
+                <h4>Средняя оценка</h4>
+                <div style={{ fontSize:24, fontWeight:700 }}>{history.length? Math.round(history.reduce((a,c)=>a+(c.score||0),0)/history.length):0}%</div>
+                <div style={{ color:'#64748b' }}>{history.length} проверок</div>
+              </div>
+            </aside>
+          </section>
+        )}
+
+        {mode==='lesson' && (
+          <section>
+            <div style={{ display:'flex', gap:12, marginBottom:12 }}>
+              {LESSONS.map(l=> (
+                <button key={l.id} onClick={()=>{ setSelectedLesson(l); setLessonIndex(0); setTranscript(''); setCorrected(''); setMatches([]) }} style={{ padding:'8px 12px', borderRadius:10, background: selectedLesson.id===l.id ? '#e6f6ff':'#fff' }}>{l.title}</button>
+              ))}
+            </div>
+
+            <div style={{ padding:16, background:'#fff', borderRadius:12 }}>
+              <h2>{selectedLesson.title}</h2>
+              <p style={{ color:'#475569' }}>Повтори за учителем: нажми «Говорить», произнеси фразу и получи обратную связь.</p>
+
+              <div style={{ marginTop:12, padding:12, borderRadius:10, background:'#f8fafc' }}>
+                <strong>Учитель говорит:</strong>
+                <div style={{ marginTop:8, fontSize:18 }}>{selectedLesson.prompts[lessonIndex]}</div>
+                <div style={{ marginTop:8 }}>
+                  <button onClick={()=>speak(selectedLesson.prompts[lessonIndex])} style={{ marginRight:8 }}>Прослушать</button>
+                  <button onClick={()=>startRecording(selectedLesson.prompts[lessonIndex])} disabled={listening} style={{ marginRight:8 }}>{listening? 'Слушаю...':'Говорить'}</button>
+                  <button onClick={()=>stopRecording()} disabled={!listening}>Остановить</button>
+                </div>
+
+                <div style={{ marginTop:12 }}>
+                  <strong>Твой ответ:</strong>
+                  <div style={{ padding:10, background:'#fff', borderRadius:8, marginTop:6 }}>{transcript||<span style={{ color:'#94a3b8' }}>Нет записи</span>}</div>
+                </div>
+
+                <div style={{ marginTop:12 }}>
+                  <strong>Исправленный вариант:</strong>
+                  <div style={{ padding:10, background:'#f0fff4', borderRadius:8, marginTop:6 }}>{corrected||<span style={{ color:'#94a3b8' }}>—</span>}</div>
+                </div>
+
+                <div style={{ marginTop:12, display:'flex', gap:8, alignItems:'center' }}>
+                  <div style={{ fontWeight:700 }}>{score}%</div>
+                  <div style={{ color:'#64748b' }}>Соответствие эталону</div>
+                </div>
+
+                <div style={{ marginTop:12 }}>
+                  <button onClick={()=>{ nextPrompt(); setTranscript(''); setCorrected(''); setMatches([]); setScore(0) }}>Следующая фраза</button>
+                </div>
+
+              </div>
+
+              <div style={{ marginTop:16 }}>
+                <h3>Анализ</h3>
+                {matches.length===0 ? <div style={{ color:'#94a3b8' }}>Нет деталей</div> : (
+                  <ul>
+                    {matches.slice(0,5).map((m,i)=> (<li key={i}><strong>{m.message}</strong> — {m.replacements && m.replacements.slice(0,3).map(r=>r.value).join(', ')}</li>))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+          </section>
+        )}
+
+      </main>
+
+      <footer style={{ marginTop:20, color:'#64748b' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', gap:12 }}>
+          <div>FR Voice Tutor — бесплатный прототип. В будущем: глубокая оценка произношения, профили пользователей и уроки.</div>
+          <div>
+            <input id="email-v3" placeholder="Твой email" style={{ padding:8, borderRadius:8 }} />
+            <button onClick={()=>{ const e = (document.getElementById('email-v3')||{}).value; if (!e||!e.includes('@')) return alert('Введи email'); const prev = safeGet(STORAGE.email,[]); prev.push({email:e,ts:Date.now()}); safeSet(STORAGE.email,prev); alert('Спасибо!')}} style={{ marginLeft:8 }}>Подписаться</button>
+          </div>
         </div>
       </footer>
     </div>
